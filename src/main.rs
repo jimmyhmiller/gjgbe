@@ -50,7 +50,7 @@ impl CPU {
                     
                 }
                 x => {
-                    println!("Don't know instruction {}", x);
+                    println!("Don't know instruction {:#02x}", x);
                     break;
                 }
             }
