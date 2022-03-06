@@ -160,7 +160,7 @@ impl Emulator {
                     println!("DEC b");
                 }
                 0x20 => {
-                    if self.cpu.flags.zero && self.cpu.flags.subtraction {
+                    if !self.cpu.flags.zero {
                         let location = self.memory.rom[self.cpu.pc as usize + 1] as i8;
                         self.cpu.pc = self.cpu.pc.wrapping_add(location as u16);
                         println!("JR NZ {:#04X}", location);
