@@ -22,6 +22,7 @@ struct CPU {
     flags: Flags,
     sp: u16,
     pc: u16,
+    interrupt_enabled: bool,
 }
 
 
@@ -44,6 +45,7 @@ impl CPU {
             },
             sp: 0,
             pc: 0x0100,
+            interrupt_enabled: true,
         }
     }
 }
@@ -53,14 +55,22 @@ struct Memory {
     rom: Vec<u8>,
     working_memory_1: [u8; 0xFFFF],
     working_memory_2: [u8; 0xFFFF],
+    io_registers: [u8; 0x7F],
+    interrupt_enable_register: u8,
+    high_ram: [u8; 0xFFFE - 0xFF80],
 }
 
 impl Memory {
     fn new() -> Memory {
         Memory {
             rom: vec![],
+            // We did the full 16 bit address space
+            // But we don't need to because these banks are not that size
             working_memory_1: [0; 0xFFFF],
             working_memory_2: [0; 0xFFFF],
+            io_registers: [0; 0x7F],
+            interrupt_enable_register: 0,
+            high_ram: [0; 0xFFFE - 0xFF80],
         }
     }
 
@@ -70,16 +80,22 @@ impl Memory {
 
     fn read_byte(&self, address: u16) -> u8 {
         match address {
+            0xFF00..=0xFF7F => self.io_registers[address as usize - 0xFF00],
+            0xFFFF..=0xFFFF => self.interrupt_enable_register,
             0xC000..=0xCFFF => self.working_memory_1[address as usize],
             0xD000..=0xDFFF => self.working_memory_2[address as usize],
+            0xFF80..=0xFFFE => self.high_ram[address as usize - 0xFF80],
             _ => panic!("Invalid memory address: 0x{:X}", address),
         }
     }
 
     fn write_byte(&mut self, address: u16, value: u8) {
         match address {
+            0xFF00..=0xFF7F => self.io_registers[address as usize - 0xFF00] = value,
+            0xFFFF..=0xFFFF => self.interrupt_enable_register = value,
             0xC000..=0xCFFF => self.working_memory_1[address as usize] = value,
             0xD000..=0xDFFF => self.working_memory_2[address as usize] = value,
+            0xFF80..=0xFFFE => self.high_ram[address as usize - 0xFF80] = value,
             _ => panic!("Invalid memory address: 0x{:X}", address),
         }
     }
@@ -120,6 +136,7 @@ impl Emulator {
                     self.cpu.a = 0
                     
                 }
+                // load into hl register
                 0x21 => {
                     let value = &self.memory.rom[(self.cpu.pc as usize) + 1..(self.cpu.pc as usize) + 3];
                     let number = ((value[1] as u16) << 8) | value[0] as u16;
@@ -130,16 +147,36 @@ impl Emulator {
                     println!("LD HL, {:#04X}", number);
                     continue;
                 }
-                0x0E => {
-                    self.cpu.c = self.memory.rom[self.cpu.pc as usize + 1];
+                0x3E => {
+                    self.cpu.a = self.memory.rom[self.cpu.pc as usize + 1];
                     self.cpu.pc += 2;
-                    println!("LD C, {:#04X}", self.cpu.c);
+                    println!("LD A, {:#04X}", self.cpu.a);
+                    continue;
+                }
+                0xE0 => {
+                    let value = self.memory.rom[self.cpu.pc as usize + 1];
+                    self.memory.write_byte(0xFF00 + (value as u16), self.cpu.a);
+                    self.cpu.pc += 2;
+                    println!("LDH (0xFF00 + {:#04X}), A", value);
+                    continue;
+                }
+                0xF0 => {
+                    let value = self.memory.rom[self.cpu.pc as usize + 1];
+                    self.cpu.a = self.memory.read_byte(0xFF00 + (value as u16));
+                    self.cpu.pc += 2;
+                    println!("LDH A, (0xFF00 + {:#04X})", value);
                     continue;
                 }
                 0x06 => {
                     self.cpu.b = self.memory.rom[self.cpu.pc as usize + 1];
                     self.cpu.pc += 2;
                     println!("LD B, {:#04X}", self.cpu.b);
+                    continue;
+                }
+                0x0E => {
+                    self.cpu.c = self.memory.rom[self.cpu.pc as usize + 1];
+                    self.cpu.pc += 2;
+                    println!("LD C, {:#04X}", self.cpu.c);
                     continue;
                 }
                 0x32 => {
@@ -152,6 +189,22 @@ impl Emulator {
                     println!("LD [hl],a; hl--, {:#04X}", memory_address);
 
                 }
+                0xFE => {
+                    let value = self.memory.rom[self.cpu.pc as usize + 1];
+                    self.cpu.flags.zero = self.cpu.a == value;
+                    self.cpu.flags.subtraction = true;
+                    // TODO: Carry and half-carry
+                    println!("CP A({:#04X}) {:#04X}", self.cpu.a, value);
+                    self.cpu.pc += 2;
+                    continue;
+                }
+                0x0D => {
+                    self.cpu.c = self.cpu.c.wrapping_sub(1);
+                    self.cpu.flags.zero = self.cpu.c == 0;
+                    self.cpu.flags.subtraction = true;
+                    // TODO: Carry and half-carry
+                    println!("DEC c");
+                }
                 0x05 => {
                     self.cpu.b = self.cpu.b.wrapping_sub(1);
                     self.cpu.flags.zero = self.cpu.b == 0;
@@ -162,12 +215,18 @@ impl Emulator {
                 0x20 => {
                     if !self.cpu.flags.zero {
                         let location = self.memory.rom[self.cpu.pc as usize + 1] as i8;
+                        self.cpu.pc += 2;
                         self.cpu.pc = self.cpu.pc.wrapping_add(location as u16);
                         println!("JR NZ {:#04X}", location);
                         continue;
                     }
                     self.cpu.pc += 2;
                     continue;
+                }
+
+                0xF3 => {
+                    self.cpu.interrupt_enabled = false;
+                    println!("DI");
                 }
                 x => {
                     println!("Don't know instruction {:#04x}", x);
